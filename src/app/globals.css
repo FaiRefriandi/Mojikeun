@@ -1,0 +1,55 @@
+@import "@fontsource/space-grotesk/400.css";
+@import "@fontsource/space-grotesk/500.css";
+@import "@fontsource/space-grotesk/600.css";
+@import "@fontsource/space-grotesk/700.css";
+@import "@fontsource/dm-mono/400.css";
+@import "@fontsource/dm-mono/500.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f2efe9;
+  --surface: #e7e2d8;
+  --ink: #1c1d1f;
+  --muted: #5c5e62;
+  --accent: #c2501b;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+canvas.pixelated {
+  image-rendering: pixelated;
+}
+
+/* Thin scrollbars for the palette strip. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #b9b2a4 transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: #b9b2a4;
+  border-radius: 3px;
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.animate-spin-slow {
+  animation: spin-slow 0.9s linear infinite;
+}
