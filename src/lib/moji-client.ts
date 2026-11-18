@@ -14,7 +14,7 @@ export type Progress = { stage: LoadStage; loaded: number; total: number };
 export type SelfTestResult = { agreement: number; meanTopDiff: number; failure: string | null };
 
 const CDN_BASE =
-  "https://huggingface.co/spaces/cfahlgren1/slack-moji/resolve/main/static/models/";
+  "https://huggingface.co/Morphkite/Mojikeun/resolve/main/";
 const CACHE = "moji-studio-v1";
 const FORCE_CPU_KEY = "moji-studio:force-cpu";
 const LOADING_KEY = "moji-studio:loading";

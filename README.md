@@ -17,9 +17,9 @@ npm start        # serves the export on port 3001 (npx serve out -l 3001 also wo
 The two ONNX model files (`tessera_w8.onnx`, `clip_text_w8.onnx`) are not
 in this repo because GitHub file uploads from here cannot carry binaries
 that large. They are downloaded automatically from the public Hugging Face
-Space on first run (see the CDN fallback in `src/lib/moji-client.ts`), or
-you can place them in `public/models/` yourself from
-`huggingface.co/spaces/cfahlgren1/slack-moji/resolve/main/static/models/`.
+model repo on first run (see the CDN fallback in `src/lib/moji-client.ts`),
+or you can place them in `public/models/` yourself from
+`huggingface.co/Morphkite/Mojikeun/resolve/main/`.
 
 ## How it works
 
@@ -33,7 +33,7 @@ schedule, Gumbel choice noise, 3 by 3 spatial NMS, self conditioning.
 
 Model files live in `public/models/` (about 115 MB, copied from the Space).
 If a local file is missing, the loader falls back to the Hugging Face CDN copy
-at `huggingface.co/spaces/cfahlgren1/slack-moji/resolve/main/static/models/`.
+at `huggingface.co/Morphkite/Mojikeun/resolve/main/`.
 Inference runs in a Web Worker (`public/moji/worker.js`) so the UI never
 freezes. WebGPU first, WASM CPU fallback, with a one time self test at load
 whose result shows in the header.
