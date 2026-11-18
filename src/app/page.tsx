@@ -7,7 +7,6 @@ import {
   loadEngine,
   type LoadStage,
   type Progress,
-  type SelfTestResult,
 } from "@/lib/moji-client";
 import {
   GRID,
@@ -25,19 +24,16 @@ const VARIANTS = 4;
 const HISTORY_KEY = "moji-studio:history";
 const FORCE_CPU_KEY = "moji-studio:force-cpu";
 
-const PRESETS: { group: string; items: string[] }[] = [
-  { group: "Animals", items: ["red crab waving", "cat wearing sunglasses", "sleepy owl", "happy axolotl"] },
-  { group: "Food", items: ["slice of pizza", "taco", "boba tea cup", "strawberry cake"] },
-  { group: "Objects", items: ["rubber duck", "vintage camera", "rocket ship", "treasure chest"] },
-  { group: "Feelings", items: ["ghost", "fire", "heart with sparkles", "sleepy moon"] },
+const PRESETS = [
+  "red crab waving",
+  "cat wearing sunglasses",
+  "sleepy owl",
+  "happy axolotl",
+  "slice of pizza",
+  "boba tea cup",
+  "rubber duck",
+  "ghost",
 ];
-
-const CPU_NOTES: Record<string, string> = {
-  "no-webgpu": "No WebGPU here, so it runs on your CPU.",
-  "gpu-error": "WebGPU failed to start here, so it runs on your CPU.",
-  "gpu-bad-output": "Your GPU gave wrong results in a quick check, so it runs on your CPU.",
-  forced: "Running on your CPU.",
-};
 
 type Status = "loading" | "ready" | "working" | "error";
 type Tool = "brush" | "eyedropper" | "eraser";
@@ -89,20 +85,15 @@ export default function MojiStudio() {
   const [total, setTotal] = useState(114900547);
   const [errorText, setErrorText] = useState("");
   const [device, setDevice] = useState("");
-  const [fallbackReason, setFallbackReason] = useState<string | null>(null);
-  const [selfTest, setSelfTest] = useState<SelfTestResult | null>(null);
 
   const [prompt, setPrompt] = useState("red crab waving");
   const [shownPrompt, setShownPrompt] = useState("");
-  const [seed, setSeed] = useState(1);
   const [variants, setVariants] = useState<
     ({ tokens: Int32Array; masked: Uint8Array | null } | null)[]
   >(Array(VARIANTS).fill(null));
   const [made, setMade] = useState(0);
   const [selected, setSelected] = useState(0);
   const [step, setStep] = useState(0);
-  const [round, setRound] = useState(1);
-  const [ms, setMs] = useState(0);
   const [stopRequested, setStopRequested] = useState(false);
 
   const [palette, setPalette] = useState<Uint8ClampedArray | null>(null);
@@ -115,7 +106,6 @@ export default function MojiStudio() {
 
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [copied, setCopied] = useState("");
-  const [editorNote, setEditorNote] = useState("");
 
   const editorRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -146,8 +136,6 @@ export default function MojiStudio() {
       clientRef.current = client;
       setPalette(client.palette);
       setDevice(client.device);
-      setFallbackReason(client.fallbackReason);
-      setSelfTest(client.selfTest);
       setColorIdx(nearestPaletteIndex(client.palette, 194, 80, 27));
       setStatus("ready");
     } catch (e) {
@@ -188,8 +176,6 @@ export default function MojiStudio() {
       setStopRequested(false);
       stopRef.current = false;
       setCopied("");
-      setEditorNote("");
-      const t0 = performance.now();
       const perRun = client.device === "webgpu" ? VARIANTS : 1;
       const rounds = VARIANTS / perRun;
       const done: Int32Array[] = [];
@@ -200,7 +186,6 @@ export default function MojiStudio() {
       setTokens(null);
       try {
         for (let r = 0; r < rounds && !stopRef.current; r++) {
-          setRound(r + 1);
           setStep(0);
           seedRef.current = (seedRef.current * 7919 + 17) % 2147483647;
           const x = await client.generate(clean, {
@@ -229,7 +214,6 @@ export default function MojiStudio() {
           setMade(done.length);
           setShownPrompt(clean);
         }
-        setSeed(seedRef.current);
         if (done.length > 0) {
           const first = new Int32Array(done[0]);
           setTokens(first);
@@ -245,7 +229,6 @@ export default function MojiStudio() {
             });
           }
         }
-        setMs(Math.round(performance.now() - t0));
         setStatus("ready");
       } catch (e) {
         setErrorText(e instanceof Error ? e.message : String(e));
@@ -254,6 +237,12 @@ export default function MojiStudio() {
     },
     [status, saveHistory],
   );
+
+  const shuffle = () => {
+    const v = Math.floor(Math.random() * 2147483647);
+    seedRef.current = v;
+    if (clientRef.current && status === "ready" && prompt.trim()) void run(prompt);
+  };
 
   const pickPreset = (text: string) => {
     setPrompt(text);
@@ -266,7 +255,6 @@ export default function MojiStudio() {
     setSelected(i);
     setTokens(new Int32Array(v.tokens));
     setPrevTokens(null);
-    setEditorNote("");
   };
 
   const paintCell = (idx: number) => {
@@ -315,14 +303,12 @@ export default function MojiStudio() {
     if (!prevTokens) return;
     setTokens(new Int32Array(prevTokens));
     setPrevTokens(null);
-    setEditorNote("Undone.");
   };
 
   const clearEditor = () => {
     if (!tokensRef.current) return;
     setPrevTokens(new Int32Array(tokensRef.current));
     setTokens(new Int32Array(N).fill(0));
-    setEditorNote("Cleared. Every pixel is transparent now.");
   };
 
   const openHistory = (item: HistoryItem) => {
@@ -332,7 +318,6 @@ export default function MojiStudio() {
     setShownPrompt(item.prompt);
     setSelected(0);
     setPrevTokens(null);
-    setEditorNote(`Opened ${item.code} from your history.`);
     document.getElementById("editor")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
@@ -395,575 +380,318 @@ export default function MojiStudio() {
   };
 
   const downloadFrac = total ? Math.min(1, loaded / total) : 0;
-  const mb = (b: number) => Math.round(b / 1e6);
   const shortcode = `:${slug(shownPrompt || prompt)}:`;
-  const checkPct = selfTest ? Math.round(selfTest.agreement * 100) : null;
   const busy = status === "working";
   const canMake = status === "ready" && !!prompt.trim();
   const currentTokens = tokens ?? (made > 0 ? (variants[selected]?.tokens ?? null) : null);
   const currentMasked = tokens ? null : (variants[selected]?.masked ?? null);
-
-  const loadTitle =
-    loadStage === "download"
-      ? `Downloading the model, ${Math.round(downloadFrac * 100)}%`
-      : loadStage === "load"
-        ? "Loading the model into memory"
-        : "Testing the model on your device";
-  const loadDetail =
-    loadStage === "download"
-      ? `${mb(loaded)} of ${mb(total)} MB, first visit only`
-      : loadStage === "load"
-        ? "Almost there"
-        : "Making sure it paints correctly";
+  const statusLine =
+    status === "loading"
+      ? loadStage === "download"
+        ? `Loading model, ${Math.round(downloadFrac * 100)}%`
+        : "Loading model"
+      : status === "working"
+        ? `Painting, step ${step} of ${STEPS}`
+        : "";
+  const statusFrac = status === "loading" ? downloadFrac : status === "working" ? step / STEPS : 0;
 
   return (
     <div className="min-h-screen bg-ground text-ink">
-      <header className="border-b border-line">
-        <div className="mx-auto flex max-w-[1180px] flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-6">
-          <div className="flex min-w-0 items-baseline gap-3">
-            <span className="font-display text-lg font-bold tracking-tight">Moji Studio</span>
-            <span className="hidden font-mono text-[11px] uppercase tracking-widest text-muted sm:inline">
-              pixel emoji atelier
-            </span>
-          </div>
-          <div className="flex items-center gap-2 font-mono text-[11px] sm:text-xs">
-            {status === "loading" && (
-              <span className="rounded-full border border-line bg-card px-3 py-1">loading model</span>
-            )}
-            {status === "ready" && device && (
-              <span className="rounded-full border border-line bg-card px-3 py-1">
-                {device === "webgpu" ? "WebGPU" : "CPU"}
-                {checkPct !== null ? `, check passed ${checkPct}%` : ""}
-              </span>
-            )}
-            {status === "working" && (
-              <span className="rounded-full border border-accent bg-accent px-3 py-1 text-accent-ink">
-                painting, step {step} of {STEPS}
-              </span>
-            )}
-            {status === "error" && (
-              <span className="rounded-full border border-accent bg-card px-3 py-1 text-accent">
-                model error
-              </span>
-            )}
-          </div>
-        </div>
-      </header>
+      <main className="mx-auto max-w-[680px] px-4 pb-12 sm:px-6">
+        <header className="flex items-baseline justify-between pt-6">
+          <h1 className="font-display text-lg font-bold tracking-tight">Moji Studio</h1>
+          <span className="font-mono text-[11px] text-muted">16 x 16</span>
+        </header>
 
-      <main className="mx-auto max-w-[1180px] px-4 pb-16 sm:px-6">
-        {/* Hero: the generator itself */}
-        <section className="grid gap-6 pt-8 lg:grid-cols-[minmax(0,1fr)_360px] lg:pt-12">
-          <div className="min-w-0">
-            <p className="font-mono text-[11px] uppercase tracking-widest text-accent">
-              001, the studio
-            </p>
-            <h1 className="mt-2 font-display text-[clamp(2rem,5vw,3.4rem)] font-bold leading-[1.05] tracking-tight">
-              Describe it.
-              <br />
-              Watch it paint itself.
-            </h1>
-            <p className="mt-3 max-w-[560px] text-[17px] leading-relaxed text-muted">
-              A tiny model paints four 16 by 16 pixel emoji from one line of text. Everything
-              happens in your browser, and the canvas below fills in step by step.
-            </p>
+        <form
+          className="mt-6 flex min-w-0 items-center gap-2 rounded-full border border-line bg-card p-2 pl-5 shadow-sm"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (busy) {
+              stopRef.current = true;
+              setStopRequested(true);
+            } else {
+              void run(prompt);
+            }
+          }}
+        >
+          <label htmlFor="moji-prompt" className="sr-only">
+            Describe an emoji
+          </label>
+          <input
+            id="moji-prompt"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Describe an emoji"
+            aria-label="Describe an emoji"
+            maxLength={120}
+            autoComplete="off"
+            spellCheck={false}
+            className="min-w-0 flex-1 rounded-full bg-transparent text-lg font-medium outline-none placeholder:text-muted/60 focus-visible:outline-2 focus-visible:outline-accent"
+          />
+          <button
+            type="submit"
+            disabled={busy ? device !== "cpu" || stopRequested : !canMake}
+            className="flex h-11 shrink-0 items-center gap-2 rounded-full bg-accent px-5 font-display text-sm font-semibold text-accent-ink transition hover:brightness-110 active:brightness-95 disabled:opacity-40"
+          >
+            {busy ? (
+              <>
+                <span className="inline-block h-3 w-3 animate-spin-slow rounded-full border-2 border-accent-ink/40 border-t-accent-ink" />
+                {device === "cpu" ? "Stop" : "Painting"}
+              </>
+            ) : (
+              "Generate"
+            )}
+          </button>
+        </form>
 
-            <form
-              className="mt-6 flex min-w-0 items-center gap-2 rounded-full border border-line bg-card p-2 pl-5 shadow-sm"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (busy) {
-                  stopRef.current = true;
-                  setStopRequested(true);
-                } else {
-                  void run(prompt);
-                }
-              }}
+        <div className="mt-3 flex flex-wrap justify-center gap-2">
+          {PRESETS.map((item) => (
+            <button
+              key={item}
+              type="button"
+              disabled={busy}
+              onClick={() => pickPreset(item)}
+              className={`rounded-full border px-3 py-2 text-sm transition-colors disabled:opacity-40 ${
+                prompt === item
+                  ? "border-ink bg-ink text-white"
+                  : "border-line bg-card hover:border-ink"
+              }`}
             >
-              <input
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Describe an emoji"
-                aria-label="Describe an emoji"
-                maxLength={120}
-                autoComplete="off"
-                spellCheck={false}
-                className="min-w-0 flex-1 bg-transparent text-lg font-medium outline-none placeholder:text-muted/60"
+              {item}
+            </button>
+          ))}
+          <button
+            type="button"
+            disabled={busy || !canMake}
+            onClick={shuffle}
+            className="rounded-full border border-accent bg-card px-3 py-2 text-sm text-accent transition-colors disabled:opacity-40"
+          >
+            Shuffle
+          </button>
+        </div>
+
+        {(status === "loading" || status === "working") && (
+          <div className="mt-5" role="status">
+            <p className="text-center font-mono text-xs text-muted">{statusLine}</p>
+            <div className="mx-auto mt-2 h-1.5 w-48 overflow-hidden rounded-full bg-surface">
+              <div
+                className="h-full bg-accent transition-all"
+                style={{ width: `${statusFrac * 100}%` }}
               />
-              <button
-                type="submit"
-                disabled={busy ? device !== "cpu" || stopRequested : !canMake}
-                className="flex h-11 shrink-0 items-center gap-2 rounded-full bg-ink px-5 font-display text-sm font-semibold text-white transition-opacity disabled:opacity-40"
-              >
-                {busy ? (
-                  <>
-                    <span className="inline-block h-3 w-3 animate-spin-slow rounded-full border-2 border-white/40 border-t-white" />
-                    {device === "cpu" ? "Stop" : "Painting"}
-                  </>
-                ) : (
-                  "Generate"
-                )}
-              </button>
-            </form>
+            </div>
+          </div>
+        )}
+        {status === "error" && (
+          <div className="mt-5 text-center">
+            <p className="break-words text-sm text-muted">{errorText}</p>
+            <button
+              type="button"
+              onClick={() => void startLoading()}
+              className="mt-3 rounded-full bg-ink px-4 py-2 font-display text-sm font-semibold text-white"
+            >
+              Try again
+            </button>
+          </div>
+        )}
 
-            <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-3">
-              <label className="flex items-center gap-2 font-mono text-xs text-muted">
-                Seed
-                <input
-                  type="number"
-                  value={seed}
-                  min={0}
-                  max={2147483646}
-                  onChange={(e) => {
-                    const v = Math.floor(Number(e.target.value));
-                    if (Number.isFinite(v) && v >= 0) {
-                      setSeed(v);
-                      seedRef.current = v;
-                    }
-                  }}
-                  className="w-28 rounded-md border border-line bg-card px-2 py-1 font-mono text-xs text-ink outline-none"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={() => {
-                  const v = Math.floor(Math.random() * 2147483647);
-                  setSeed(v);
-                  seedRef.current = v;
-                }}
-                className="rounded-full border border-line bg-card px-3 py-1 font-mono text-xs hover:border-ink"
-              >
-                Random seed
-              </button>
-              <span className="font-mono text-xs text-muted">
-                Same prompt, new seed, new emoji.
+        <div className="mt-6 flex flex-col items-center">
+          <div className="flex aspect-square w-full max-w-[280px] items-center justify-center rounded-3xl bg-card p-4">
+            {currentTokens && palette ? (
+              <SpriteCanvas
+                tokens={currentTokens}
+                palette={palette}
+                masked={currentMasked}
+                size={256}
+                className="h-auto w-full"
+              />
+            ) : (
+              <span className="px-6 text-center font-mono text-xs leading-relaxed text-muted">
+                Your emoji appears here.
               </span>
-            </div>
-
-            <div className="mt-6 space-y-3">
-              {PRESETS.map((g) => (
-                <div key={g.group} className="flex flex-wrap items-center gap-2">
-                  <span className="w-20 shrink-0 font-mono text-[11px] uppercase tracking-widest text-muted">
-                    {g.group}
-                  </span>
-                  {g.items.map((item) => (
-                    <button
-                      key={item}
-                      type="button"
-                      disabled={busy}
-                      onClick={() => pickPreset(item)}
-                      className={`rounded-full border px-3 py-1.5 text-sm transition-colors disabled:opacity-40 ${
-                        prompt === item
-                          ? "border-ink bg-ink text-white"
-                          : "border-line bg-card hover:border-ink"
-                      }`}
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
-              ))}
-            </div>
-
-            {/* Load and run status */}
-            <div className="mt-6 rounded-2xl border border-line bg-card p-4">
-              {status === "loading" && (
-                <div>
-                  <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <span className="font-display text-sm font-semibold">{loadTitle}</span>
-                    <span className="font-mono text-xs text-muted">{loadDetail}</span>
-                  </div>
-                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-surface">
-                    <div
-                      className="h-full bg-accent transition-all"
-                      style={{ width: `${downloadFrac * 100}%` }}
-                    />
-                  </div>
-                  <p className="mt-2 font-mono text-[11px] text-muted">
-                    Tessera-small plus CLIP, about 115 MB. Cached after the first visit.
-                  </p>
-                </div>
-              )}
-              {status === "error" && (
-                <div>
-                  <p className="font-display text-sm font-semibold">The model did not load.</p>
-                  <p className="mt-1 break-words text-sm text-muted">{errorText}</p>
-                  <button
-                    type="button"
-                    onClick={() => void startLoading()}
-                    className="mt-3 rounded-full bg-ink px-4 py-2 font-display text-sm font-semibold text-white"
-                  >
-                    Try again
-                  </button>
-                </div>
-              )}
-              {status === "working" && (
-                <div>
-                  <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <span className="font-display text-sm font-semibold">
-                      {device === "cpu"
-                        ? `Specimen ${round} of ${VARIANTS}, painting step ${step} of ${STEPS}`
-                        : `Painting, step ${step} of ${STEPS}`}
-                    </span>
-                    <span className="font-mono text-xs text-muted">
-                      {device === "cpu" ? "on your CPU, about 10 s each" : "on your GPU"}
-                    </span>
-                  </div>
-                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-surface">
-                    <div
-                      className="h-full bg-accent transition-all"
-                      style={{
-                        width: `${(((round - 1) * STEPS + step) / ((device === "cpu" ? VARIANTS : 1) * STEPS)) * 100}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-              {status === "ready" && (
-                <p className="text-sm text-muted">
-                  {ms > 0
-                    ? `${made} specimens in ${(ms / 1000).toFixed(1)} s, on your ${device === "webgpu" ? "GPU" : "CPU"}.`
-                    : "Ready. Type anything."}
-                  {fallbackReason ? ` ${CPU_NOTES[fallbackReason] ?? ""}` : ""}
-                  {selfTest && checkPct !== null
-                    ? ` Model check passed at ${checkPct}% match.`
-                    : ""}
-                </p>
-              )}
-            </div>
+            )}
           </div>
+          {made > 0 && (
+            <button
+              type="button"
+              onClick={() => void copyCode()}
+              title="Copy the emoji name"
+              className="mt-3 truncate rounded-full bg-surface px-4 py-2 font-mono text-sm hover:bg-line"
+            >
+              {copied === "copy-code" ? "Copied" : shortcode}
+            </button>
+          )}
+        </div>
 
-          {/* Big preview */}
-          <div className="min-w-0">
-            <div className="rounded-2xl border border-line bg-card p-4">
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="font-mono text-[11px] uppercase tracking-widest text-muted">
-                  002, the canvas
-                </span>
-                <span className="font-mono text-[11px] text-muted">16 by 16</span>
-              </div>
-              <div className="mt-3 flex items-center justify-center rounded-xl bg-surface p-4">
-                {currentTokens && palette ? (
-                  <SpriteCanvas
-                    tokens={currentTokens}
-                    palette={palette}
-                    masked={currentMasked}
-                    size={256}
-                    className="h-auto w-full max-w-[280px]"
-                  />
-                ) : (
-                  <div className="flex aspect-square w-full max-w-[280px] items-center justify-center rounded-lg border border-dashed border-line">
-                    <span className="px-6 text-center font-mono text-xs leading-relaxed text-muted">
-                      {status === "loading"
-                        ? "The model is still loading."
-                        : "Your emoji appears here."}
-                    </span>
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => void copyCode()}
-                title="Copy the emoji name"
-                className="mt-3 w-full truncate rounded-full bg-surface px-4 py-2 font-mono text-sm hover:bg-line"
-              >
-                {copied === "copy-code" ? "Copied" : shortcode}
-              </button>
-              <p className="mt-2 text-center font-mono text-[11px] text-muted">
-                {shownPrompt ? `“${shownPrompt}”` : "Pick a preset, or write your own line."}
-              </p>
-            </div>
-            <p className="mt-3 font-mono text-[11px] leading-relaxed text-muted">
-              47.6M params, 16 diffusion steps, 512 colour palette. The model unmasks the
-              canvas a few pixels at a time, most confident first.
-            </p>
-          </div>
-        </section>
-
-        {/* Variants */}
-        <section className="mt-12">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="font-display text-2xl font-bold tracking-tight">Specimens</h2>
-            <span className="font-mono text-[11px] uppercase tracking-widest text-muted">
-              003, four variants, pick one
-            </span>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {variants.map((v, i) => (
-              <button
-                key={i}
-                type="button"
-                disabled={!v || i >= made}
-                onClick={() => selectVariant(i)}
-                aria-label={`Variation ${i + 1}`}
-                className={`flex flex-col items-center gap-2 rounded-2xl border bg-card p-4 transition-colors disabled:opacity-40 ${
-                  i === selected && made > 0 ? "border-accent" : "border-line hover:border-ink"
-                }`}
-              >
-                {v && palette ? (
-                  <SpriteCanvas tokens={v.tokens} palette={palette} masked={v.masked} size={128} className="h-auto w-full max-w-[120px]" />
-                ) : (
-                  <span className="flex aspect-square w-full max-w-[120px] items-center justify-center rounded-lg bg-surface font-mono text-xs text-muted">
-                    {busy && i < round ? "painting" : `0${i + 1}`}
-                  </span>
-                )}
-                <span className="font-mono text-[11px] uppercase tracking-widest text-muted">
-                  {i === selected && made > 0 ? "selected" : `variant 0${i + 1}`}
-                </span>
-              </button>
-            ))}
-          </div>
-        </section>
-
-        {/* Editor and export */}
-        <section id="editor" className="mt-12 scroll-mt-6">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="font-display text-2xl font-bold tracking-tight">The workbench</h2>
-            <span className="font-mono text-[11px] uppercase tracking-widest text-muted">
-              004, fix it pixel by pixel
-            </span>
-          </div>
-          <div className="mt-4 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-            <div className="min-w-0 rounded-2xl border border-line bg-card p-4">
-              {tokens && palette ? (
-                <>
-                  <canvas
-                    ref={editorRef}
-                    width={256}
-                    height={256}
-                    className="pixelated mx-auto block h-auto w-full max-w-[420px] cursor-crosshair touch-none rounded-lg bg-surface"
-                    onPointerDown={onEditorDown}
-                    onPointerMove={onEditorMove}
-                    onPointerUp={onEditorUp}
-                    onPointerLeave={onEditorUp}
-                  />
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {(
-                      [
-                        ["brush", "Brush"],
-                        ["eyedropper", "Eyedropper"],
-                        ["eraser", "Eraser"],
-                      ] as [Tool, string][]
-                    ).map(([t, label]) => (
-                      <button
-                        key={t}
-                        type="button"
-                        onClick={() => setTool(t)}
-                        className={`rounded-full border px-4 py-2 font-display text-sm font-semibold ${
-                          tool === t ? "border-ink bg-ink text-white" : "border-line bg-card hover:border-ink"
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={undoEdit}
-                      disabled={!prevTokens}
-                      className="rounded-full border border-line bg-card px-4 py-2 font-display text-sm font-semibold disabled:opacity-40"
-                    >
-                      Undo
-                    </button>
-                    <button
-                      type="button"
-                      onClick={clearEditor}
-                      className="rounded-full border border-line bg-card px-4 py-2 font-display text-sm font-semibold"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                  <p className="mt-3 font-mono text-[11px] leading-relaxed text-muted">
-                    {tool === "brush" && "Click or drag to paint with the selected colour."}
-                    {tool === "eyedropper" && "Click a pixel to pick its colour."}
-                    {tool === "eraser" && "Click or drag to erase a pixel to transparent."}
-                    {editorNote ? ` ${editorNote}` : ""}
-                  </p>
-                </>
+        <div className="mt-4 grid grid-cols-4 gap-2 sm:gap-3">
+          {variants.map((v, i) => (
+            <button
+              key={i}
+              type="button"
+              disabled={!v || i >= made}
+              onClick={() => selectVariant(i)}
+              aria-label={`Variation ${i + 1}`}
+              className={`flex aspect-square items-center justify-center rounded-2xl border bg-card p-2 transition-colors disabled:opacity-40 ${
+                i === selected && made > 0 ? "border-accent" : "border-line hover:border-ink"
+              }`}
+            >
+              {v && palette ? (
+                <SpriteCanvas tokens={v.tokens} palette={palette} masked={v.masked} size={128} className="h-auto w-full" />
               ) : (
-                <p className="py-10 text-center font-mono text-xs leading-relaxed text-muted">
-                  Generate an emoji first, or open one from your history below.
-                </p>
-              )}
-            </div>
-
-            <div className="min-w-0 space-y-4">
-              <div className="rounded-2xl border border-line bg-card p-4">
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="font-mono text-[11px] uppercase tracking-widest text-muted">
-                    Palette, 512 colours
-                  </span>
-                  <span className="font-mono text-[11px] text-muted">
-                    {colorIdx === 0 ? "transparent" : `#${colorIdx}`}
-                  </span>
-                </div>
-                <div className="scroll-thin mt-3 flex max-h-[180px] flex-wrap gap-1 overflow-y-auto pr-1">
-                  {palette ? (
-                    Array.from({ length: 512 }, (_, i) => {
-                      const r = palette[i * 4];
-                      const g = palette[i * 4 + 1];
-                      const b = palette[i * 4 + 2];
-                      const a = palette[i * 4 + 3];
-                      return (
-                        <button
-                          key={i}
-                          type="button"
-                          title={i === 0 ? "transparent" : `colour ${i}`}
-                          aria-label={i === 0 ? "transparent" : `colour ${i}`}
-                          onClick={() => {
-                            setColorIdx(i);
-                            setTool("brush");
-                          }}
-                          style={{
-                            background: a === 0 ? "repeating-conic-gradient(#d8d2c6 0% 25%, #faf8f4 0% 50%) 0 0 / 8px 8px" : `rgba(${r},${g},${b},${a / 255})`,
-                          }}
-                          className={`h-[18px] w-[18px] shrink-0 rounded-[4px] border ${
-                            colorIdx === i ? "border-accent ring-2 ring-accent" : "border-line"
-                          }`}
-                        />
-                      );
-                    })
-                  ) : (
-                    <span className="font-mono text-xs text-muted">Palette loads with the model.</span>
-                  )}
-                </div>
-                <div className="mt-3 flex items-center gap-2">
-                  <span
-                    className="h-8 w-8 shrink-0 rounded-md border border-line"
-                    style={{
-                      background:
-                        colorIdx === 0 || !palette
-                          ? "repeating-conic-gradient(#d8d2c6 0% 25%, #faf8f4 0% 50%) 0 0 / 8px 8px"
-                          : `rgba(${palette[colorIdx * 4]},${palette[colorIdx * 4 + 1]},${palette[colorIdx * 4 + 2]},${palette[colorIdx * 4 + 3] / 255})`,
-                    }}
-                  />
-                  <span className="font-mono text-xs text-muted">
-                    {colorIdx === 0
-                      ? "Transparent, the eraser colour."
-                      : `Colour ${colorIdx} of 512, the learned palette.`}
-                  </span>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-line bg-card p-4">
-                <span className="font-mono text-[11px] uppercase tracking-widest text-muted">
-                  Export
+                <span className="font-mono text-xs text-muted">
+                  {busy ? "..." : `0${i + 1}`}
                 </span>
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void downloadSelected()}
-                    disabled={!tokens}
-                    className="rounded-full bg-ink px-4 py-2.5 font-display text-sm font-semibold text-white disabled:opacity-40"
-                  >
-                    {copied === "download" ? "Saved" : "Download PNG"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void downloadAll()}
-                    disabled={made === 0}
-                    className="rounded-full border border-ink px-4 py-2.5 font-display text-sm font-semibold disabled:opacity-40"
-                  >
-                    {copied === "download-all" ? "Saved all 4" : "Download all 4"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void copyPng()}
-                    disabled={!tokens}
-                    className="rounded-full border border-line bg-card px-4 py-2.5 font-display text-sm font-semibold disabled:opacity-40"
-                  >
-                    {copied === "copy-png" ? "Copied" : "Copy PNG"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void copyCode()}
-                    className="rounded-full border border-line bg-card px-4 py-2.5 font-display text-sm font-semibold"
-                  >
-                    {copied === "copy-code" ? "Copied" : "Copy shortcode"}
-                  </button>
-                </div>
-                <p className="mt-3 font-mono text-[11px] leading-relaxed text-muted">
-                  PNG is 128 by 128, crisp pixels, ready for Slack. Shortcode is {shortcode}
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
+              )}
+            </button>
+          ))}
+        </div>
 
-        {/* History */}
-        <section className="mt-12">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="font-display text-2xl font-bold tracking-tight">Your shelf</h2>
-            <span className="font-mono text-[11px] uppercase tracking-widest text-muted">
-              005, saved on this device only
-            </span>
-          </div>
-          {history.length === 0 ? (
-            <p className="mt-4 rounded-2xl border border-dashed border-line p-6 text-sm text-muted">
-              Nothing here yet. Generate an emoji and the selected one joins the shelf.
-            </p>
-          ) : (
-            <div className="scroll-thin mt-4 flex gap-3 overflow-x-auto pb-2">
-              {history.map((item) => (
-                <div
-                  key={item.id}
-                  className="w-[132px] shrink-0 rounded-2xl border border-line bg-card p-3"
+        <section id="editor" className="mt-8 scroll-mt-6">
+          {tokens && palette ? (
+            <>
+              <canvas
+                ref={editorRef}
+                width={256}
+                height={256}
+                className="pixelated mx-auto block h-auto w-full max-w-[420px] cursor-crosshair touch-none rounded-2xl bg-card p-2"
+                onPointerDown={onEditorDown}
+                onPointerMove={onEditorMove}
+                onPointerUp={onEditorUp}
+                onPointerLeave={onEditorUp}
+              />
+              <div className="mt-3 flex flex-wrap justify-center gap-2">
+                {(
+                  [
+                    ["brush", "Brush"],
+                    ["eyedropper", "Eyedropper"],
+                    ["eraser", "Eraser"],
+                  ] as [Tool, string][]
+                ).map(([t, label]) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setTool(t)}
+                    className={`rounded-full border px-4 py-2 font-display text-sm font-semibold ${
+                      tool === t ? "border-ink bg-ink text-white" : "border-line bg-card hover:border-ink"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={undoEdit}
+                  disabled={!prevTokens}
+                  className="rounded-full border border-line bg-card px-4 py-2 font-display text-sm font-semibold disabled:opacity-40"
                 >
-                  <button
-                    type="button"
-                    onClick={() => openHistory(item)}
-                    className="block w-full text-left"
-                    title={`Open ${item.code}`}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={item.dataUrl}
-                      alt={item.prompt}
-                      width={128}
-                      height={128}
-                      className="pixelated h-auto w-full rounded-lg bg-surface"
+                  Undo
+                </button>
+                <button
+                  type="button"
+                  onClick={clearEditor}
+                  className="rounded-full border border-line bg-card px-4 py-2 font-display text-sm font-semibold"
+                >
+                  Clear
+                </button>
+              </div>
+              <div className="scroll-thin mx-auto mt-3 flex max-h-[120px] max-w-[420px] flex-wrap justify-center gap-1 overflow-y-auto">
+                {Array.from({ length: 512 }, (_, i) => {
+                  const r = palette[i * 4];
+                  const g = palette[i * 4 + 1];
+                  const b = palette[i * 4 + 2];
+                  const a = palette[i * 4 + 3];
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      title={i === 0 ? "transparent" : `colour ${i}`}
+                      aria-label={i === 0 ? "transparent" : `colour ${i}`}
+                      onClick={() => {
+                        setColorIdx(i);
+                        setTool("brush");
+                      }}
+                      style={{
+                        background: a === 0 ? "repeating-conic-gradient(#d8d2c6 0% 25%, #faf8f4 0% 50%) 0 0 / 8px 8px" : `rgba(${r},${g},${b},${a / 255})`,
+                      }}
+                      className={`h-[16px] w-[16px] shrink-0 rounded-[4px] border ${
+                        colorIdx === i ? "border-accent ring-2 ring-accent" : "border-line"
+                      }`}
                     />
-                    <span className="mt-2 block truncate font-mono text-[11px]">{item.code}</span>
-                    <span className="block truncate text-xs text-muted">{item.prompt}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => removeHistory(item.id)}
-                    className="mt-1 font-mono text-[11px] text-muted hover:text-accent"
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
+                  );
+                })}
+              </div>
+            </>
+          ) : (
+            <p className="py-6 text-center font-mono text-xs leading-relaxed text-muted">
+              Generate an emoji first.
+            </p>
           )}
         </section>
 
-        {/* Credits */}
-        <footer className="mt-16 border-t border-line pt-6">
-          <p className="text-sm leading-relaxed text-muted">
-            Tessera-small by Jagrat Patel (TheJagStudio), CC BY-NC 4.0, a non commercial
-            demo. CLIP text encoder by OpenAI, MIT.
-          </p>
-          <p className="mt-2 text-sm leading-relaxed">
-            <a
-              className="underline underline-offset-2 hover:text-accent"
-              href="https://huggingface.co/thejagstudio/tessera-small"
-              target="_blank"
-              rel="noopener"
+        {made > 0 && (
+          <div className="mt-6 flex flex-wrap justify-center gap-2">
+            <button
+              type="button"
+              onClick={() => void downloadSelected()}
+              disabled={!tokens}
+              className="rounded-full bg-ink px-4 py-2.5 font-display text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-40"
             >
-              thejagstudio/tessera-small
-            </a>
-            {" · "}
-            <a
-              className="underline underline-offset-2 hover:text-accent"
-              href="https://huggingface.co/spaces/cfahlgren1/slack-moji"
-              target="_blank"
-              rel="noopener"
+              {copied === "download" ? "Saved" : "Download PNG"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void downloadAll()}
+              disabled={made === 0}
+              className="rounded-full border border-ink px-4 py-2.5 font-display text-sm font-semibold disabled:opacity-40"
             >
-              the original Slack Moji Space by cfahlgren1
-            </a>
-          </p>
-          <p className="mt-2 font-mono text-[11px] leading-relaxed text-muted">
-            All generation runs in your browser. No prompt or image leaves your device.
+              {copied === "download-all" ? "Saved all 4" : "Download all 4"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void copyPng()}
+              disabled={!tokens}
+              className="rounded-full border border-line bg-card px-4 py-2.5 font-display text-sm font-semibold disabled:opacity-40"
+            >
+              {copied === "copy-png" ? "Copied" : "Copy PNG"}
+            </button>
+          </div>
+        )}
+
+        {history.length > 0 && (
+          <div className="scroll-thin mt-8 flex gap-2 overflow-x-auto pb-2">
+            {history.map((item) => (
+              <div key={item.id} className="relative w-[72px] shrink-0">
+                <button
+                  type="button"
+                  onClick={() => openHistory(item)}
+                  className="block w-full text-left"
+                  title={`Open ${item.code}`}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={item.dataUrl}
+                    alt={item.prompt}
+                    width={128}
+                    height={128}
+                    className="pixelated h-auto w-full rounded-xl bg-card"
+                  />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => removeHistory(item.id)}
+                  aria-label="Remove"
+                  className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-ink text-[11px] leading-none text-white"
+                >
+                  x
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <footer className="mt-10 border-t border-line pt-4 text-center">
+          <p className="font-mono text-[11px] leading-relaxed text-muted">
+            Tessera-small by Jagrat Patel, CC BY-NC 4.0. CLIP by OpenAI, MIT.
           </p>
         </footer>
       </main>
