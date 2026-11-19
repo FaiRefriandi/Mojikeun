@@ -25,6 +25,11 @@ export const FILES = [
   { key: "clip", path: "models/clip_text_w8.onnx", bytes: 64060515 },
 ] as const;
 
+/** Pixelart 50m UNet, downloaded lazily the first time 32x32 is picked. */
+export const FILES50 = [
+  { key: "den50", path: "models/pixelart50m_w8.onnx", bytes: 137816708 },
+] as const;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function openCache(): Promise<Cache | null> {
@@ -48,7 +53,7 @@ async function fetchJson(path: string): Promise<unknown> {
  * /models copy first, then the Hugging Face CDN copy when local is missing.
  */
 async function fetchBytes(
-  file: (typeof FILES)[number],
+  file: { key: string; path: string; bytes: number },
   onBytes: (n: number) => void,
 ): Promise<ArrayBuffer> {
   const cache = await openCache();
@@ -191,6 +196,7 @@ export class MojiClient {
   readonly palette: Uint8ClampedArray;
   private worker: Worker;
   private nextId = 1;
+  private has50m = false;
 
   constructor(
     worker: Worker,
@@ -204,6 +210,59 @@ export class MojiClient {
     this.device = device;
     this.fallbackReason = fallbackReason;
     this.selfTest = selfTest;
+  }
+
+  /** Download the 32x32 model once and start its session in the worker. */
+  async ensure50m(onProgress?: (p: Progress) => void): Promise<void> {
+    if (this.has50m) return;
+    const file = FILES50[0];
+    const bytes = await fetchBytes(file, (n) =>
+      onProgress?.({ stage: "download", loaded: n, total: file.bytes }),
+    );
+    onProgress?.({ stage: "load", loaded: file.bytes, total: file.bytes });
+    await new Promise<void>((resolve, reject) => {
+      this.worker.onmessage = (e: MessageEvent) => {
+        if (e.data.type === "ready50") resolve();
+        else if (e.data.type === "error") reject(new Error(e.data.message));
+      };
+      this.worker.onerror = (e) => reject(new Error(e.message || "The model worker failed to start"));
+      this.worker.postMessage({ type: "init50", bytes }, [bytes]);
+    });
+    this.has50m = true;
+  }
+
+  /** Generate n 32x32 sprites; onStep(step, frames) is called for every step, paced for display. */
+  generate50(
+    prompt: string,
+    { n = 4, seed = 0, onStep }: { n?: number; seed?: number; onStep?: (k: number, frames: Uint8ClampedArray[]) => void },
+  ): Promise<Uint8ClampedArray[]> {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      let chain = Promise.resolve();
+      let step = 0;
+      this.worker.onmessage = (e: MessageEvent) => {
+        const m = e.data;
+        if (m.id !== id) return;
+        if (m.type === "step50") {
+          const k = step++;
+          chain = chain.then(async () => {
+            const t = performance.now();
+            onStep?.(k, m.frames as Uint8ClampedArray[]);
+            await sleep(Math.max(0, STEP_MS - (performance.now() - t)));
+          });
+        } else if (m.type === "done50") chain.then(() => resolve(m.frames as Uint8ClampedArray[]));
+        else if (m.type === "error") {
+          if (m.message !== BAD_OUTPUT) return reject(new Error(m.message));
+          rememberForceCpu();
+          reject(
+            new Error(
+              "Your GPU returned broken numbers for this model. Reload the page and it will run on your CPU instead.",
+            ),
+          );
+        }
+      };
+      this.worker.postMessage({ type: "generate50", id, prompt, n, seed });
+    });
   }
 
   /** Generate n sprites; onStep(step, tokens, masked) is called for every step, paced for display. */

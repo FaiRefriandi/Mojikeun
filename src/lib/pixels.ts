@@ -28,18 +28,52 @@ export function tokensToRGBA(
 }
 
 /** Paint RGBA pixels onto a square canvas, crisp, one fillRect per pixel. */
-export function paintRGBA(canvas: HTMLCanvasElement, rgba: Uint8ClampedArray) {
+export function paintRGBA(canvas: HTMLCanvasElement, rgba: Uint8ClampedArray, grid = GRID) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const size = canvas.width;
-  const s = size / GRID;
+  const s = size / grid;
+  const n = grid * grid;
   ctx.clearRect(0, 0, size, size);
-  for (let i = 0; i < N; i++) {
+  for (let i = 0; i < n; i++) {
     const a = rgba[i * 4 + 3];
     if (!a) continue;
     ctx.fillStyle = `rgba(${rgba[i * 4]},${rgba[i * 4 + 1]},${rgba[i * 4 + 2]},${a / 255})`;
-    ctx.fillRect((i % GRID) * s, Math.floor(i / GRID) * s, Math.ceil(s), Math.ceil(s));
+    ctx.fillRect((i % grid) * s, Math.floor(i / grid) * s, Math.ceil(s), Math.ceil(s));
   }
+}
+
+/** PNG blob of an RGBA sprite, upscaled to `size` px with no smoothing. */
+export function pngBlobFromRGBA(rgba: Uint8ClampedArray, grid: number, size = 256): Promise<Blob> {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  paintRGBA(c, rgba, grid);
+  return new Promise((resolve, reject) =>
+    c.toBlob((b) => (b ? resolve(b) : reject(new Error("PNG encode failed"))), "image/png"),
+  );
+}
+
+export function rgbaToDataURL(rgba: Uint8ClampedArray, grid: number, size = 256): string {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  paintRGBA(c, rgba, grid);
+  return c.toDataURL("image/png");
+}
+
+/** Distinct opaque colours in an RGBA sprite, in first-seen order. */
+export function uniqueColors(rgba: Uint8ClampedArray, max = 16): [number, number, number, number][] {
+  const seen = new Set<number>();
+  const out: [number, number, number, number][] = [];
+  for (let i = 0; i < rgba.length / 4; i++) {
+    const a = rgba[i * 4 + 3];
+    if (!a) continue;
+    const key = (rgba[i * 4] << 16) | (rgba[i * 4 + 1] << 8) | rgba[i * 4 + 2];
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push([rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], 255]);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 export function paintTokens(

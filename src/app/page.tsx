@@ -13,12 +13,18 @@ import {
   N,
   downloadBlob,
   nearestPaletteIndex,
+  paintRGBA,
   paintTokens,
   pngBlob,
+  pngBlobFromRGBA,
   slug,
+  uniqueColors,
 } from "@/lib/pixels";
 
-const STEPS = 16;
+const GRID32 = 32;
+const N32 = GRID32 * GRID32;
+const STEPS16 = 16;
+const STEPS32 = 30;
 const VARIANTS = 4;
 const FORCE_CPU_KEY = "moji-studio:force-cpu";
 
@@ -33,6 +39,7 @@ const PRESETS = [
   "ghost",
 ];
 
+type Size = 16 | 32;
 type Status = "loading" | "ready" | "working" | "error";
 type Tool = "brush" | "eyedropper" | "eraser";
 
@@ -63,6 +70,29 @@ function SpriteCanvas({
   );
 }
 
+function RgbaCanvas({
+  rgba,
+  size,
+  className,
+}: {
+  rgba: Uint8ClampedArray | null;
+  size: number;
+  className?: string;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    if (ref.current && rgba) paintRGBA(ref.current, rgba, GRID32);
+  }, [rgba]);
+  return (
+    <canvas
+      ref={ref}
+      width={size}
+      height={size}
+      className={`pixelated ${className ?? ""}`}
+    />
+  );
+}
+
 export default function Mojikeun() {
   const clientRef = useRef<MojiClient | null>(null);
   const seedRef = useRef(1);
@@ -75,11 +105,19 @@ export default function Mojikeun() {
   const [errorText, setErrorText] = useState("");
   const [device, setDevice] = useState("");
 
+  const [size, setSize] = useState<Size>(16);
+  const sizeRef = useRef<Size>(16);
+  const [has50m, setHas50m] = useState(false);
+  const has50mRef = useRef(false);
+
   const [prompt, setPrompt] = useState("red crab waving");
   const [shownPrompt, setShownPrompt] = useState("");
   const [variants, setVariants] = useState<
     ({ tokens: Int32Array; masked: Uint8Array | null } | null)[]
   >(Array(VARIANTS).fill(null));
+  const [variants32, setVariants32] = useState<({ rgba: Uint8ClampedArray } | null)[]>(
+    Array(VARIANTS).fill(null),
+  );
   const [made, setMade] = useState(0);
   const [selected, setSelected] = useState(0);
   const [step, setStep] = useState(0);
@@ -88,9 +126,13 @@ export default function Mojikeun() {
   const [palette, setPalette] = useState<Uint8ClampedArray | null>(null);
   const [tokens, setTokens] = useState<Int32Array | null>(null);
   const tokensRef = useRef<Int32Array | null>(null);
+  const [rgba32, setRgba32] = useState<Uint8ClampedArray | null>(null);
+  const rgba32Ref = useRef<Uint8ClampedArray | null>(null);
   const [tool, setTool] = useState<Tool>("brush");
   const [colorIdx, setColorIdx] = useState(1);
+  const [color32, setColor32] = useState<[number, number, number, number]>([194, 80, 27, 255]);
   const [prevTokens, setPrevTokens] = useState<Int32Array | null>(null);
+  const [prevRgba32, setPrevRgba32] = useState<Uint8ClampedArray | null>(null);
   const paintingRef = useRef(false);
 
   const [copied, setCopied] = useState("");
@@ -99,10 +141,19 @@ export default function Mojikeun() {
   useEffect(() => {
     if (editorRef.current && tokens && palette) paintTokens(editorRef.current, tokens, palette);
   }, [tokens, palette]);
+  useEffect(() => {
+    if (editorRef.current && rgba32) paintRGBA(editorRef.current, rgba32, GRID32);
+  }, [rgba32]);
 
   useEffect(() => {
     tokensRef.current = tokens;
   }, [tokens]);
+  useEffect(() => {
+    rgba32Ref.current = rgba32;
+  }, [rgba32]);
+  useEffect(() => {
+    sizeRef.current = size;
+  }, [size]);
 
   const startLoading = useCallback(async () => {
     setStatus("loading");
@@ -136,11 +187,55 @@ export default function Mojikeun() {
     startLoading();
   }, [startLoading]);
 
+  const resetResults = useCallback(() => {
+    setVariants(Array(VARIANTS).fill(null));
+    setVariants32(Array(VARIANTS).fill(null));
+    setMade(0);
+    setSelected(0);
+    setTokens(null);
+    setRgba32(null);
+    setPrevTokens(null);
+    setPrevRgba32(null);
+    setShownPrompt("");
+  }, []);
+
+  const changeSize = useCallback(
+    async (next: Size) => {
+      if (next === sizeRef.current || status !== "ready") return;
+      if (next === 32 && !has50mRef.current) {
+        const client = clientRef.current;
+        if (!client) return;
+        setStatus("loading");
+        setLoadStage("download");
+        setErrorText("");
+        try {
+          await client.ensure50m((p: Progress) => {
+            setLoadStage(p.stage);
+            setLoaded(p.loaded);
+            setTotal(p.total);
+          });
+          has50mRef.current = true;
+          setHas50m(true);
+        } catch (e) {
+          setErrorText(e instanceof Error ? e.message : String(e));
+          setStatus("error");
+          return;
+        }
+      }
+      resetResults();
+      setSize(next);
+      setStatus("ready");
+    },
+    [status, resetResults],
+  );
+
   const run = useCallback(
     async (text: string) => {
       const client = clientRef.current;
       const clean = text.trim();
       if (!client || !clean || status === "working") return;
+      const is32 = sizeRef.current === 32;
+      if (is32 && !has50mRef.current) return;
       setPrompt(clean);
       setStatus("working");
       setStopRequested(false);
@@ -149,42 +244,73 @@ export default function Mojikeun() {
       const perRun = client.device === "webgpu" ? VARIANTS : 1;
       const rounds = VARIANTS / perRun;
       const done: Int32Array[] = [];
+      const done32: Uint8ClampedArray[] = [];
       const empty = () =>
         Array(VARIANTS).fill(null) as ({ tokens: Int32Array; masked: Uint8Array | null } | null)[];
+      const empty32 = () =>
+        Array(VARIANTS).fill(null) as ({ rgba: Uint8ClampedArray } | null)[];
       setMade(0);
       setSelected(0);
       setTokens(null);
+      setRgba32(null);
       try {
         for (let r = 0; r < rounds && !stopRef.current; r++) {
           setStep(0);
           seedRef.current = (seedRef.current * 7919 + 17) % 2147483647;
-          const x = await client.generate(clean, {
-            n: perRun,
-            seed: seedRef.current,
-            onStep: (k, sx, smasked) => {
-              setStep(k + 1);
-              // Live frame: finished rounds plus the current partial round,
-              // with still masked pixels shown in pale grey.
-              const partials = Array.from({ length: perRun }, (_, b) => ({
-                tokens: sx.slice(b * N, (b + 1) * N),
-                masked: smasked.slice(b * N, (b + 1) * N),
-              }));
-              setVariants([
-                ...done.map((d) => ({ tokens: d, masked: null as Uint8Array | null })),
-                ...partials,
-                ...empty(),
-              ].slice(0, VARIANTS));
-            },
-          });
-          for (let b = 0; b < perRun; b++) done.push(x.slice(b * N, (b + 1) * N));
-          setVariants([
-            ...done.map((d) => ({ tokens: d, masked: null as Uint8Array | null })),
-            ...empty(),
-          ].slice(0, VARIANTS));
-          setMade(done.length);
-          setShownPrompt(clean);
+          if (is32) {
+            const frames = await client.generate50(clean, {
+              n: perRun,
+              seed: seedRef.current,
+              onStep: (k, partials) => {
+                setStep(k + 1);
+                setVariants32([
+                  ...done32.map((d) => ({ rgba: d })),
+                  ...partials.map((f) => ({ rgba: f })),
+                  ...empty32(),
+                ].slice(0, VARIANTS));
+              },
+            });
+            for (let b = 0; b < perRun; b++) done32.push(frames[b]);
+            setVariants32([
+              ...done32.map((d) => ({ rgba: d })),
+              ...empty32(),
+            ].slice(0, VARIANTS));
+            setMade(done32.length);
+            setShownPrompt(clean);
+          } else {
+            const x = await client.generate(clean, {
+              n: perRun,
+              seed: seedRef.current,
+              onStep: (k, sx, smasked) => {
+                setStep(k + 1);
+                // Live frame: finished rounds plus the current partial round,
+                // with still masked pixels shown in pale grey.
+                const partials = Array.from({ length: perRun }, (_, b) => ({
+                  tokens: sx.slice(b * N, (b + 1) * N),
+                  masked: smasked.slice(b * N, (b + 1) * N),
+                }));
+                setVariants([
+                  ...done.map((d) => ({ tokens: d, masked: null as Uint8Array | null })),
+                  ...partials,
+                  ...empty(),
+                ].slice(0, VARIANTS));
+              },
+            });
+            for (let b = 0; b < perRun; b++) done.push(x.slice(b * N, (b + 1) * N));
+            setVariants([
+              ...done.map((d) => ({ tokens: d, masked: null as Uint8Array | null })),
+              ...empty(),
+            ].slice(0, VARIANTS));
+            setMade(done.length);
+            setShownPrompt(clean);
+          }
         }
-        if (done.length > 0) {
+        if (is32) {
+          if (done32.length > 0) {
+            setRgba32(new Uint8ClampedArray(done32[0]));
+            setSelected(0);
+          }
+        } else if (done.length > 0) {
           const first = new Int32Array(done[0]);
           setTokens(first);
           setSelected(0);
@@ -210,14 +336,43 @@ export default function Mojikeun() {
   };
 
   const selectVariant = (i: number) => {
-    const v = variants[i];
-    if (!v || i >= made) return;
+    if (i >= made) return;
     setSelected(i);
-    setTokens(new Int32Array(v.tokens));
-    setPrevTokens(null);
+    if (size === 32) {
+      const v = variants32[i];
+      if (!v) return;
+      setRgba32(new Uint8ClampedArray(v.rgba));
+      setPrevRgba32(null);
+    } else {
+      const v = variants[i];
+      if (!v) return;
+      setTokens(new Int32Array(v.tokens));
+      setPrevTokens(null);
+    }
   };
 
   const paintCell = (idx: number) => {
+    if (size === 32) {
+      const cur = rgba32Ref.current;
+      if (!cur) return;
+      if (tool === "eyedropper") {
+        const a = cur[idx * 4 + 3];
+        if (a) setColor32([cur[idx * 4], cur[idx * 4 + 1], cur[idx * 4 + 2], 255]);
+        setTool("brush");
+        return;
+      }
+      const next = new Uint8ClampedArray(cur);
+      if (tool === "eraser") {
+        next[idx * 4 + 3] = 0;
+      } else {
+        next[idx * 4] = color32[0];
+        next[idx * 4 + 1] = color32[1];
+        next[idx * 4 + 2] = color32[2];
+        next[idx * 4 + 3] = color32[3];
+      }
+      setRgba32(next);
+      return;
+    }
     const cur = tokensRef.current;
     if (!cur) return;
     if (tool === "eyedropper") {
@@ -234,17 +389,24 @@ export default function Mojikeun() {
   const cellFromEvent = (e: React.PointerEvent<HTMLCanvasElement>): number | null => {
     const canvas = e.currentTarget;
     const rect = canvas.getBoundingClientRect();
-    const x = Math.floor(((e.clientX - rect.left) / rect.width) * GRID);
-    const y = Math.floor(((e.clientY - rect.top) / rect.height) * GRID);
-    if (x < 0 || x >= GRID || y < 0 || y >= GRID) return null;
-    return y * GRID + x;
+    const grid = size === 32 ? GRID32 : GRID;
+    const x = Math.floor(((e.clientX - rect.left) / rect.width) * grid);
+    const y = Math.floor(((e.clientY - rect.top) / rect.height) * grid);
+    if (x < 0 || x >= grid || y < 0 || y >= grid) return null;
+    return y * grid + x;
   };
 
   const onEditorDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const idx = cellFromEvent(e);
-    if (idx === null || !tokensRef.current) return;
+    if (idx === null) return;
+    if (size === 32) {
+      if (!rgba32Ref.current) return;
+      setPrevRgba32(new Uint8ClampedArray(rgba32Ref.current));
+    } else {
+      if (!tokensRef.current) return;
+      setPrevTokens(new Int32Array(tokensRef.current));
+    }
     paintingRef.current = true;
-    setPrevTokens(new Int32Array(tokensRef.current));
     (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     paintCell(idx);
   };
@@ -260,12 +422,24 @@ export default function Mojikeun() {
   };
 
   const undoEdit = () => {
+    if (size === 32) {
+      if (!prevRgba32) return;
+      setRgba32(new Uint8ClampedArray(prevRgba32));
+      setPrevRgba32(null);
+      return;
+    }
     if (!prevTokens) return;
     setTokens(new Int32Array(prevTokens));
     setPrevTokens(null);
   };
 
   const clearEditor = () => {
+    if (size === 32) {
+      if (!rgba32Ref.current) return;
+      setPrevRgba32(new Uint8ClampedArray(rgba32Ref.current));
+      setRgba32(new Uint8ClampedArray(N32 * 4).fill(0));
+      return;
+    }
     if (!tokensRef.current) return;
     setPrevTokens(new Int32Array(tokensRef.current));
     setTokens(new Int32Array(N).fill(0));
@@ -277,6 +451,13 @@ export default function Mojikeun() {
   };
 
   const downloadSelected = async () => {
+    if (size === 32) {
+      if (!rgba32) return;
+      const blob = await pngBlobFromRGBA(rgba32, GRID32, 256);
+      downloadBlob(blob, `${slug(shownPrompt || prompt)}.png`);
+      flash("download");
+      return;
+    }
     if (!tokens || !palette) return;
     const blob = await pngBlob(tokens, palette, 128);
     downloadBlob(blob, `${slug(shownPrompt || prompt)}.png`);
@@ -284,8 +465,19 @@ export default function Mojikeun() {
   };
 
   const downloadAll = async () => {
-    if (!palette) return;
     const base = slug(shownPrompt || prompt);
+    if (size === 32) {
+      for (let i = 0; i < made; i++) {
+        const v = variants32[i];
+        if (!v) continue;
+        const blob = await pngBlobFromRGBA(v.rgba, GRID32, 256);
+        downloadBlob(blob, `${base}-${i + 1}.png`);
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      flash("download-all");
+      return;
+    }
+    if (!palette) return;
     for (let i = 0; i < made; i++) {
       const v = variants[i];
       if (!v) continue;
@@ -297,9 +489,16 @@ export default function Mojikeun() {
   };
 
   const copyPng = async () => {
-    if (!tokens || !palette) return;
     try {
-      const blob = await pngBlob(tokens, palette, 128);
+      const blob =
+        size === 32
+          ? rgba32
+            ? await pngBlobFromRGBA(rgba32, GRID32, 256)
+            : null
+          : tokens && palette
+            ? await pngBlob(tokens, palette, 128)
+            : null;
+      if (!blob) return;
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       flash("copy-png");
     } catch {
@@ -320,25 +519,44 @@ export default function Mojikeun() {
   const downloadFrac = total ? Math.min(1, loaded / total) : 0;
   const shortcode = `:${slug(shownPrompt || prompt)}:`;
   const busy = status === "working";
+  const loading = status === "loading";
   const canMake = status === "ready" && !!prompt.trim();
+  const steps = size === 32 ? STEPS32 : STEPS16;
   const currentTokens = tokens ?? (made > 0 ? (variants[selected]?.tokens ?? null) : null);
   const currentMasked = tokens ? null : (variants[selected]?.masked ?? null);
+  const currentRgba =
+    rgba32 ?? (made > 0 ? (variants32[selected]?.rgba ?? null) : null);
+  const editorReady = size === 32 ? !!rgba32 : !!(tokens && palette);
   const statusLine =
     status === "loading"
       ? loadStage === "download"
         ? `Loading model, ${Math.round(downloadFrac * 100)}%`
         : "Loading model"
       : status === "working"
-        ? `Painting, step ${step} of ${STEPS}`
+        ? `Painting, step ${step} of ${steps}`
         : "";
-  const statusFrac = status === "loading" ? downloadFrac : status === "working" ? step / STEPS : 0;
+  const statusFrac = status === "loading" ? downloadFrac : status === "working" ? step / steps : 0;
+  const swatches32 = rgba32 ? uniqueColors(rgba32) : [];
 
   return (
     <div className="min-h-screen bg-ground text-ink">
       <main className="mx-auto max-w-[680px] px-4 pb-12 sm:px-6">
         <header className="flex items-baseline justify-between pt-6">
           <h1 className="font-display text-lg font-bold tracking-tight">Mojikeun</h1>
-          <span className="font-mono text-[11px] text-muted">16 x 16</span>
+          <label className="sr-only" htmlFor="moji-size">
+            Emoji size
+          </label>
+          <select
+            id="moji-size"
+            value={size}
+            disabled={busy || loading}
+            onChange={(e) => void changeSize(Number(e.target.value) as Size)}
+            aria-label="Emoji size"
+            className="rounded-full border border-line bg-card px-3 py-1.5 font-mono text-[11px] text-muted outline-none focus:border-accent disabled:opacity-40"
+          >
+            <option value={16}>16 x 16</option>
+            <option value={32}>32 x 32</option>
+          </select>
         </header>
 
         <form
@@ -435,7 +653,15 @@ export default function Mojikeun() {
 
         <div className="mt-6 flex flex-col items-center">
           <div className="flex aspect-square w-full max-w-[280px] items-center justify-center rounded-3xl bg-card p-4">
-            {currentTokens && palette ? (
+            {size === 32 ? (
+              currentRgba ? (
+                <RgbaCanvas rgba={currentRgba} size={256} className="h-auto w-full" />
+              ) : (
+                <span className="px-6 text-center font-mono text-xs leading-relaxed text-muted">
+                  Your emoji appears here.
+                </span>
+              )
+            ) : currentTokens && palette ? (
               <SpriteCanvas
                 tokens={currentTokens}
                 palette={palette}
@@ -462,30 +688,39 @@ export default function Mojikeun() {
         </div>
 
         <div className="mt-4 grid grid-cols-4 gap-2 sm:gap-3">
-          {variants.map((v, i) => (
-            <button
-              key={i}
-              type="button"
-              disabled={!v || i >= made}
-              onClick={() => selectVariant(i)}
-              aria-label={`Variation ${i + 1}`}
-              className={`flex aspect-square items-center justify-center rounded-2xl border bg-card p-2 transition-colors disabled:opacity-40 ${
-                i === selected && made > 0 ? "border-accent" : "border-line hover:border-ink"
-              }`}
-            >
-              {v && palette ? (
-                <SpriteCanvas tokens={v.tokens} palette={palette} masked={v.masked} size={128} className="h-auto w-full" />
-              ) : (
-                <span className="font-mono text-xs text-muted">
-                  {busy ? "..." : `0${i + 1}`}
-                </span>
-              )}
-            </button>
-          ))}
+          {[0, 1, 2, 3].map((i) => {
+            const v = size === 32 ? variants32[i] : variants[i];
+            return (
+              <button
+                key={i}
+                type="button"
+                disabled={!v || i >= made}
+                onClick={() => selectVariant(i)}
+                aria-label={`Variation ${i + 1}`}
+                className={`flex aspect-square items-center justify-center rounded-2xl border bg-card p-2 transition-colors disabled:opacity-40 ${
+                  i === selected && made > 0 ? "border-accent" : "border-line hover:border-ink"
+                }`}
+              >
+                {size === 32 ? (
+                  v && "rgba" in v ? (
+                    <RgbaCanvas rgba={v.rgba} size={128} className="h-auto w-full" />
+                  ) : (
+                    <span className="font-mono text-xs text-muted">{busy ? "..." : `0${i + 1}`}</span>
+                  )
+                ) : v && "tokens" in v && palette ? (
+                  <SpriteCanvas tokens={v.tokens} palette={palette} masked={v.masked} size={128} className="h-auto w-full" />
+                ) : (
+                  <span className="font-mono text-xs text-muted">
+                    {busy ? "..." : `0${i + 1}`}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
         <section id="editor" className="mt-8 scroll-mt-6">
-          {tokens && palette ? (
+          {editorReady ? (
             <>
               <canvas
                 ref={editorRef}
@@ -519,7 +754,7 @@ export default function Mojikeun() {
                 <button
                   type="button"
                   onClick={undoEdit}
-                  disabled={!prevTokens}
+                  disabled={size === 32 ? !prevRgba32 : !prevTokens}
                   className="rounded-full border border-line bg-card px-4 py-2 font-display text-sm font-semibold disabled:opacity-40"
                 >
                   Undo
@@ -532,32 +767,73 @@ export default function Mojikeun() {
                   Clear
                 </button>
               </div>
-              <div className="scroll-thin mx-auto mt-3 flex max-h-[120px] max-w-[420px] flex-wrap justify-center gap-1 overflow-y-auto">
-                {Array.from({ length: 512 }, (_, i) => {
-                  const r = palette[i * 4];
-                  const g = palette[i * 4 + 1];
-                  const b = palette[i * 4 + 2];
-                  const a = palette[i * 4 + 3];
-                  return (
+              {size === 32 ? (
+                <div className="mx-auto mt-3 flex max-w-[420px] flex-wrap justify-center gap-1">
+                  <button
+                    type="button"
+                    title="transparent"
+                    aria-label="transparent"
+                    onClick={() => {
+                      setColor32([0, 0, 0, 0]);
+                      setTool("brush");
+                    }}
+                    style={{
+                      background:
+                        "repeating-conic-gradient(#d8d2c6 0% 25%, #faf8f4 0% 50%) 0 0 / 8px 8px",
+                    }}
+                    className={`h-[16px] w-[16px] shrink-0 rounded-[4px] border ${
+                      color32[3] === 0 ? "border-accent ring-2 ring-accent" : "border-line"
+                    }`}
+                  />
+                  {swatches32.map(([r, g, b], i) => (
                     <button
                       key={i}
                       type="button"
-                      title={i === 0 ? "transparent" : `colour ${i}`}
-                      aria-label={i === 0 ? "transparent" : `colour ${i}`}
+                      title={`colour ${i + 1}`}
+                      aria-label={`colour ${i + 1}`}
                       onClick={() => {
-                        setColorIdx(i);
+                        setColor32([r, g, b, 255]);
                         setTool("brush");
                       }}
-                      style={{
-                        background: a === 0 ? "repeating-conic-gradient(#d8d2c6 0% 25%, #faf8f4 0% 50%) 0 0 / 8px 8px" : `rgba(${r},${g},${b},${a / 255})`,
-                      }}
+                      style={{ background: `rgba(${r},${g},${b},1)` }}
                       className={`h-[16px] w-[16px] shrink-0 rounded-[4px] border ${
-                        colorIdx === i ? "border-accent ring-2 ring-accent" : "border-line"
+                        color32[0] === r && color32[1] === g && color32[2] === b && color32[3] === 255
+                          ? "border-accent ring-2 ring-accent"
+                          : "border-line"
                       }`}
                     />
-                  );
-                })}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                palette && (
+                  <div className="scroll-thin mx-auto mt-3 flex max-h-[120px] max-w-[420px] flex-wrap justify-center gap-1 overflow-y-auto">
+                    {Array.from({ length: 512 }, (_, i) => {
+                      const r = palette[i * 4];
+                      const g = palette[i * 4 + 1];
+                      const b = palette[i * 4 + 2];
+                      const a = palette[i * 4 + 3];
+                      return (
+                        <button
+                          key={i}
+                          type="button"
+                          title={i === 0 ? "transparent" : `colour ${i}`}
+                          aria-label={i === 0 ? "transparent" : `colour ${i}`}
+                          onClick={() => {
+                            setColorIdx(i);
+                            setTool("brush");
+                          }}
+                          style={{
+                            background: a === 0 ? "repeating-conic-gradient(#d8d2c6 0% 25%, #faf8f4 0% 50%) 0 0 / 8px 8px" : `rgba(${r},${g},${b},${a / 255})`,
+                          }}
+                          className={`h-[16px] w-[16px] shrink-0 rounded-[4px] border ${
+                            colorIdx === i ? "border-accent ring-2 ring-accent" : "border-line"
+                          }`}
+                        />
+                      );
+                    })}
+                  </div>
+                )
+              )}
             </>
           ) : (
             <p className="py-6 text-center font-mono text-xs leading-relaxed text-muted">
@@ -571,7 +847,7 @@ export default function Mojikeun() {
             <button
               type="button"
               onClick={() => void downloadSelected()}
-              disabled={!tokens}
+              disabled={size === 32 ? !rgba32 : !tokens}
               className="rounded-full bg-ink px-4 py-2.5 font-display text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-40"
             >
               {copied === "download" ? "Saved" : "Download PNG"}
@@ -587,7 +863,7 @@ export default function Mojikeun() {
             <button
               type="button"
               onClick={() => void copyPng()}
-              disabled={!tokens}
+              disabled={size === 32 ? !rgba32 : !tokens}
               className="rounded-full border border-line bg-card px-4 py-2.5 font-display text-sm font-semibold disabled:opacity-40"
             >
               {copied === "copy-png" ? "Copied" : "Copy PNG"}
