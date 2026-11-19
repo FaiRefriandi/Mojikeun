@@ -19,19 +19,6 @@ self.onmessage = async (e) => {
       });
       return;
     }
-    if (m.type === "init50") {
-      await engine.load50m(m.bytes);
-      self.postMessage({ type: "ready50", device: engine.device });
-      return;
-    }
-    if (m.type === "generate50") {
-      const frames = await engine.generate50m(m.prompt, {
-        n: m.n,
-        seed: m.seed,
-        onStep: (_k, frames) => self.postMessage({ type: "step50", id: m.id, frames }),
-      });
-      self.postMessage({ type: "done50", id: m.id, frames });
-    }
     if (m.type === "generate") {
       const x = await engine.generate(m.prompt, {
         n: m.n,

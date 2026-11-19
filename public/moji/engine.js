@@ -7,7 +7,6 @@
 // (agreement, mean top-logit error) is attached to the Engine so the UI can show it.
 
 import { ClipTokenizer } from "./tokenizer.js";
-import { mulberry32 as mulberry32_50m, gaussian as gaussian50m, rawToRGBA as rawToRGBA50m } from "./flow50m.js";
 
 const ORT_VERSION = "1.22.0";
 // Vendored locally in public/ort/ (copied from the onnxruntime-web npm package
@@ -111,7 +110,7 @@ export async function createEngine(bytes, tokJson, palette, selfTestRef, { force
     return [den, clip];
   };
 
-  const testAndWrap = async (den, clip, device, fallbackReason, ep) => {
+  const testAndWrap = async (den, clip, device, fallbackReason) => {
     onStage?.("check");
     let result;
     try {
@@ -123,14 +122,14 @@ export async function createEngine(bytes, tokJson, palette, selfTestRef, { force
       await Promise.all([den.release(), clip.release()]);
       return { failure: result.failure, result };
     }
-    const engine = new Engine(ort, den, clip, tokenizer, palette, device, fallbackReason, ep);
+    const engine = new Engine(ort, den, clip, tokenizer, palette, device, fallbackReason);
     engine.selfTest = result;
     return { engine, result };
   };
 
   const onCpu = async (fallbackReason) => {
     const [den, clip] = await create("wasm");
-    const { engine, failure } = await testAndWrap(den, clip, "cpu", fallbackReason, "wasm");
+    const { engine, failure } = await testAndWrap(den, clip, "cpu", fallbackReason);
     if (!engine) throw new Error(`Self-test failed on CPU: ${failure}`);
     return engine;
   };
@@ -146,7 +145,7 @@ export async function createEngine(bytes, tokJson, palette, selfTestRef, { force
     return onCpu("gpu-error");
   }
 
-  const gpu = await testAndWrap(den, clip, "webgpu", null, "webgpu");
+  const gpu = await testAndWrap(den, clip, "webgpu", null);
   if (gpu.engine) return gpu.engine;
 
   console.warn(`WebGPU failed the self-test (${gpu.failure}), falling back to the CPU`);
@@ -154,46 +153,16 @@ export async function createEngine(bytes, tokJson, palette, selfTestRef, { force
 }
 
 export class Engine {
-  constructor(ort, den, clip, tokenizer, palette, device, fallbackReason, ep = "wasm") {
+  constructor(ort, den, clip, tokenizer, palette, device, fallbackReason) {
     this.device = device;
     this.fallbackReason = fallbackReason;
-    this.ep = ep;
     this.ort = ort;
     this.den = den;
     this.clip = clip;
     this.tokenizer = tokenizer;
     this.palette = palette;
-    /** Pixelart 50m UNet session, loaded lazily on the first 32x32 run. */
-    this.den50 = null;
     /** { failure, agreement, meanTopDiff } from the one self-test run at load. */
     this.selfTest = null;
-  }
-
-  /** Load the Pixelart 50m UNet on the same device as the rest of the engine. */
-  async load50m(bytes) {
-    if (this.den50) return;
-    const opts = {
-      executionProviders: [this.ep],
-      graphOptimizationLevel: "all",
-      extra: { optimization: { disable_specified_optimizers: "ConstantFolding" } },
-    };
-    const session = await this.ort.InferenceSession.create(bytes, opts);
-    // One forward pass on zeros: a session that loads is not proof it runs.
-    const out = await session.run({
-      x: new this.ort.Tensor("float32", new Float32Array(4 * 32 * 32), [1, 4, 32, 32]),
-      t: new this.ort.Tensor("float32", new Float32Array([0.5]), [1]),
-      text_states: new this.ort.Tensor("float32", new Float32Array(24 * 512), [1, 24, 512]),
-      text_mask: new this.ort.Tensor("bool", new Uint8Array(24), [1, 24]),
-      text_pooled: new this.ort.Tensor("float32", new Float32Array(512), [1, 512]),
-    });
-    const v = out.velocity.data;
-    for (let i = 0; i < v.length; i++) {
-      if (!Number.isFinite(v[i])) {
-        await session.release();
-        throw new Error(BAD_OUTPUT);
-      }
-    }
-    this.den50 = session;
   }
 
   async encodeText(prompt) {
@@ -347,132 +316,5 @@ export class Engine {
       if (onStep) await onStep(k, x, masked);
     }
     return x;
-  }
-
-  /**
-   * Generate `n` 32x32 sprites with Pixelart 50m. A flow-matching UNet
-   * (rectified flow, velocity prediction) sampled with Heun integration,
-   * 30 steps, CFG 4 applied only while t is in [0, 0.75]. Ported from
-   * pixelart/model.py sample(). onStep(step, frames) gets the current RGBA
-   * frames (raw, unquantised) so the page can show the image sharpening;
-   * the returned frames are quantised to at most 16 colours.
-   */
-  async generate50m(prompt, { n = 4, seed = 0, onStep } = {}) {
-    const { Tensor } = this.ort;
-    if (!this.den50) throw new Error("The 32x32 model is not loaded yet");
-    const caption = `pixel art icon of a ${prompt}`;
-    const ids = this.tokenizer.encodeFixed(caption, TEXT_LEN);
-    const nullIds = this.tokenizer.encodeFixed("", TEXT_LEN);
-    const enc = await this.clip.run({
-      input_ids: new Tensor("int64", BigInt64Array.from(ids, BigInt), [1, TEXT_LEN]),
-    });
-    const nullEnc = await this.clip.run({
-      input_ids: new Tensor("int64", BigInt64Array.from(nullIds, BigInt), [1, TEXT_LEN]),
-    });
-    // The JS tokenizer pads with EOS, the Python one with 0; the mask is the
-    // positions past the real tokens, which matches the Python attention mask.
-    const maskOf = (all, real) => Uint8Array.from({ length: TEXT_LEN }, (_, i) => (i >= real ? 1 : 0));
-    const mask = maskOf(ids, this.tokenizer.encode(caption).length);
-    const nullMask = maskOf(nullIds, this.tokenizer.encode("").length);
-
-    const rand = mulberry32_50m(seed);
-    const gauss = gaussian50m(rand);
-    const NC = 4 * 32 * 32;
-    const x = new Float32Array(n * NC);
-    for (let i = 0; i < x.length; i++) x[i] = gauss();
-
-    const steps = 30;
-    const cfg = 4.0;
-    const ts = new Float64Array(steps + 1);
-    for (let i = 0; i <= steps; i++) ts[i] = 1 - i / steps;
-
-    const velocity = async (xx, t) => {
-      const B = xx.length / NC;
-      const tt = new Float32Array(B).fill(t);
-      const states = (src) => {
-        const out = new Float32Array(B * TEXT_LEN * TEXT_DIM);
-        for (let b = 0; b < B; b++) out.set(src, b * TEXT_LEN * TEXT_DIM);
-        return out;
-      };
-      const pooled = (src) => {
-        const out = new Float32Array(B * TEXT_DIM);
-        for (let b = 0; b < B; b++) out.set(src, b * TEXT_DIM);
-        return out;
-      };
-      const masks = (src) => {
-        const out = new Uint8Array(B * TEXT_LEN);
-        for (let b = 0; b < B; b++) out.set(src, b * TEXT_LEN);
-        return out;
-      };
-      if (t < 0 || t > 0.75) {
-        const out = await this.den50.run({
-          x: new Tensor("float32", xx, [B, 4, 32, 32]),
-          t: new Tensor("float32", tt, [B]),
-          text_states: new Tensor("float32", states(enc.last_hidden_state.data), [B, TEXT_LEN, TEXT_DIM]),
-          text_mask: new Tensor("bool", masks(mask), [B, TEXT_LEN]),
-          text_pooled: new Tensor("float32", pooled(enc.pooler_output.data), [B, TEXT_DIM]),
-        });
-        return out.velocity.data;
-      }
-      const B2 = B * 2;
-      const xx2 = new Float32Array(B2 * NC);
-      xx2.set(xx, 0);
-      xx2.set(xx, B * NC);
-      const tt2 = new Float32Array(B2).fill(t);
-      const st2 = new Float32Array(B2 * TEXT_LEN * TEXT_DIM);
-      st2.set(states(enc.last_hidden_state.data), 0);
-      st2.set(states(nullEnc.last_hidden_state.data), B * TEXT_LEN * TEXT_DIM);
-      const mk2 = new Uint8Array(B2 * TEXT_LEN);
-      mk2.set(masks(mask), 0);
-      mk2.set(masks(nullMask), B * TEXT_LEN);
-      const pl2 = new Float32Array(B2 * TEXT_DIM);
-      pl2.set(pooled(enc.pooler_output.data), 0);
-      pl2.set(pooled(nullEnc.pooler_output.data), B * TEXT_DIM);
-      const out = await this.den50.run({
-        x: new Tensor("float32", xx2, [B2, 4, 32, 32]),
-        t: new Tensor("float32", tt2, [B2]),
-        text_states: new Tensor("float32", st2, [B2, TEXT_LEN, TEXT_DIM]),
-        text_mask: new Tensor("bool", mk2, [B2, TEXT_LEN]),
-        text_pooled: new Tensor("float32", pl2, [B2, TEXT_DIM]),
-      });
-      const both = out.velocity.data;
-      const v = new Float32Array(B * NC);
-      for (let i = 0; i < v.length; i++) {
-        const unc = both[B * NC + i];
-        v[i] = unc + cfg * (both[i] - unc);
-      }
-      return v;
-    };
-
-    for (let k = 0; k < steps; k++) {
-      const t0 = ts[k];
-      const t1 = ts[k + 1];
-      const dt = t1 - t0;
-      const v0 = await velocity(x, t0);
-      const xE = new Float32Array(x.length);
-      for (let i = 0; i < x.length; i++) xE[i] = x[i] + dt * v0[i];
-      if (t1 > 0) {
-        const v1 = await velocity(xE, t1);
-        for (let i = 0; i < x.length; i++) x[i] += dt * 0.5 * (v0[i] + v1[i]);
-      } else {
-        x.set(xE);
-      }
-      for (let i = 0; i < x.length; i++) {
-        if (!Number.isFinite(x[i])) throw new Error(BAD_OUTPUT);
-      }
-      if (onStep) {
-        const frames = [];
-        for (let b = 0; b < n; b++) frames.push(rawToRGBA50m(x.subarray(b * NC, (b + 1) * NC), false));
-        await onStep(k, frames);
-      }
-    }
-    const out = [];
-    for (let b = 0; b < n; b++) {
-      const xi = x.subarray(b * NC, (b + 1) * NC);
-      const clamped = new Float32Array(NC);
-      for (let i = 0; i < NC; i++) clamped[i] = Math.max(-1, Math.min(1, xi[i]));
-      out.push(rawToRGBA50m(clamped, true));
-    }
-    return out;
   }
 }
