@@ -1,4 +1,4 @@
-# Moji Studio
+# Mojikeun
 
 Pixel emoji atelier. Describe an emoji and Tessera-small paints four 16 by 16
 pixel versions, right in your browser. Pick one, fix it pixel by pixel,

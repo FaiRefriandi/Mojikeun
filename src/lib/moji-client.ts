@@ -1,4 +1,4 @@
-// Main-thread side of the Moji Studio engine: downloads the ONNX models
+// Main-thread side of the Mojikeun engine: downloads the ONNX models
 // (local /models first, Hugging Face CDN fallback), starts the Web Worker,
 // and exposes generate() with per-step progress.
 //

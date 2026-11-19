@@ -16,12 +16,10 @@ import {
   paintTokens,
   pngBlob,
   slug,
-  tokensToDataURL,
 } from "@/lib/pixels";
 
 const STEPS = 16;
 const VARIANTS = 4;
-const HISTORY_KEY = "moji-studio:history";
 const FORCE_CPU_KEY = "moji-studio:force-cpu";
 
 const PRESETS = [
@@ -37,15 +35,6 @@ const PRESETS = [
 
 type Status = "loading" | "ready" | "working" | "error";
 type Tool = "brush" | "eyedropper" | "eraser";
-
-type HistoryItem = {
-  id: number;
-  prompt: string;
-  code: string;
-  tokens: number[];
-  dataUrl: string;
-  ts: number;
-};
 
 function SpriteCanvas({
   tokens,
@@ -74,7 +63,7 @@ function SpriteCanvas({
   );
 }
 
-export default function MojiStudio() {
+export default function Mojikeun() {
   const clientRef = useRef<MojiClient | null>(null);
   const seedRef = useRef(1);
   const stopRef = useRef(false);
@@ -104,7 +93,6 @@ export default function MojiStudio() {
   const [prevTokens, setPrevTokens] = useState<Int32Array | null>(null);
   const paintingRef = useRef(false);
 
-  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [copied, setCopied] = useState("");
 
   const editorRef = useRef<HTMLCanvasElement>(null);
@@ -145,26 +133,8 @@ export default function MojiStudio() {
   }, []);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (raw) setHistory(JSON.parse(raw) as HistoryItem[]);
-    } catch {
-      // A broken history entry is not fatal; start empty.
-    }
     startLoading();
   }, [startLoading]);
-
-  const saveHistory = useCallback((item: HistoryItem) => {
-    setHistory((prev) => {
-      const next = [item, ...prev].slice(0, 12);
-      try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-      } catch {
-        // Storage full or blocked; history just stays in memory.
-      }
-      return next;
-    });
-  }, []);
 
   const run = useCallback(
     async (text: string) => {
@@ -218,16 +188,6 @@ export default function MojiStudio() {
           const first = new Int32Array(done[0]);
           setTokens(first);
           setSelected(0);
-          if (client.palette) {
-            saveHistory({
-              id: Date.now(),
-              prompt: clean,
-              code: `:${slug(clean)}:`,
-              tokens: Array.from(first),
-              dataUrl: tokensToDataURL(first, client.palette, 128),
-              ts: Date.now(),
-            });
-          }
         }
         setStatus("ready");
       } catch (e) {
@@ -235,7 +195,7 @@ export default function MojiStudio() {
         setStatus("error");
       }
     },
-    [status, saveHistory],
+    [status],
   );
 
   const shuffle = () => {
@@ -311,28 +271,6 @@ export default function MojiStudio() {
     setTokens(new Int32Array(N).fill(0));
   };
 
-  const openHistory = (item: HistoryItem) => {
-    if (!palette) return;
-    setTokens(new Int32Array(item.tokens));
-    setPrompt(item.prompt);
-    setShownPrompt(item.prompt);
-    setSelected(0);
-    setPrevTokens(null);
-    document.getElementById("editor")?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-
-  const removeHistory = (id: number) => {
-    setHistory((prev) => {
-      const next = prev.filter((h) => h.id !== id);
-      try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-      } catch {
-        // Ignore storage errors.
-      }
-      return next;
-    });
-  };
-
   const flash = (key: string) => {
     setCopied(key);
     setTimeout(() => setCopied(""), 1600);
@@ -399,12 +337,12 @@ export default function MojiStudio() {
     <div className="min-h-screen bg-ground text-ink">
       <main className="mx-auto max-w-[680px] px-4 pb-12 sm:px-6">
         <header className="flex items-baseline justify-between pt-6">
-          <h1 className="font-display text-lg font-bold tracking-tight">Moji Studio</h1>
+          <h1 className="font-display text-lg font-bold tracking-tight">Mojikeun</h1>
           <span className="font-mono text-[11px] text-muted">16 x 16</span>
         </header>
 
         <form
-          className="mt-6 flex min-w-0 items-center gap-2 rounded-full border border-line bg-card p-2 pl-5 shadow-sm"
+          className="mt-6 flex min-w-0 items-center gap-2 rounded-full border border-line bg-card p-2 pl-5 shadow-sm focus-within:border-accent focus-within:ring-2 focus-within:ring-accent"
           onSubmit={(e) => {
             e.preventDefault();
             if (busy) {
@@ -427,7 +365,7 @@ export default function MojiStudio() {
             maxLength={120}
             autoComplete="off"
             spellCheck={false}
-            className="min-w-0 flex-1 rounded-full bg-transparent text-lg font-medium outline-none placeholder:text-muted/60 focus-visible:outline-2 focus-visible:outline-accent"
+            className="min-w-0 flex-1 rounded-full bg-transparent text-lg font-medium outline-none placeholder:text-muted/60"
           />
           <button
             type="submit"
@@ -657,43 +595,6 @@ export default function MojiStudio() {
           </div>
         )}
 
-        {history.length > 0 && (
-          <div className="scroll-thin mt-8 flex gap-2 overflow-x-auto pb-2">
-            {history.map((item) => (
-              <div key={item.id} className="relative w-[72px] shrink-0">
-                <button
-                  type="button"
-                  onClick={() => openHistory(item)}
-                  className="block w-full text-left"
-                  title={`Open ${item.code}`}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={item.dataUrl}
-                    alt={item.prompt}
-                    width={128}
-                    height={128}
-                    className="pixelated h-auto w-full rounded-xl bg-card"
-                  />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => removeHistory(item.id)}
-                  aria-label="Remove"
-                  className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-ink text-[11px] leading-none text-white"
-                >
-                  x
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <footer className="mt-10 border-t border-line pt-4 text-center">
-          <p className="font-mono text-[11px] leading-relaxed text-muted">
-            Tessera-small by Jagrat Patel, CC BY-NC 4.0. CLIP by OpenAI, MIT.
-          </p>
-        </footer>
       </main>
     </div>
   );
